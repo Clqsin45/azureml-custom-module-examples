@@ -36,6 +36,7 @@ logging.info(f"Load pyarrow.parquet explicitly: {pq}")
 
 
 class Classification:
+    # todo : support batch input
     def __init__(self, model_dir: str):
         self.model, self.tokenizer, self.model_config = self.load_model(model_dir)
         self.label_map = self.model_config["label_map"]
@@ -54,10 +55,32 @@ class Classification:
         tokenizer = BertTokenizer.from_pretrained(model_config["bert_model"], do_lower_case=model_config["do_lower"])
         return model, tokenizer, model_config
 
-    def predict(self, eval_dataloader, data_frame):
-        model.eval()
-        preds = []
+    def build_data_loader(self, text_list):
+        features = []
+        for text in text_list:
+            # todo: write a preprocessor class or modify preprocess_input as a method in class
+            inputs_ids, input_mask, segment_ids = preprocess_input(self.max_seq_length, self.tokenizer, text)
+            features.append(InputFeatures(
+            input_ids=input_ids,
+            input_mask=input_mask,
+            segment_ids=segment_ids,
+            label_id=label_id))
+        all_input_ids = torch.tensor([f.input_ids for f in features], dtype=torch.long)
+        all_input_mask = torch.tensor([f.input_mask for f in features], dtype=torch.long)
+        all_segment_ids = torch.tensor([f.segment_ids for f in features], dtype=torch.long)
+        # all_label_ids = torch.tensor([f.label_id for f in features], dtype=torch.long)
 
+        eval_data = TensorDataset(all_input_ids, all_input_mask, all_segment_ids)
+        eval_sampler = SequentialSampler(eval_data)
+        eval_dataloader = DataLoader(eval_data, sampler=eval_sampler, batch_size=args.eval_batch_size)
+        
+        
+    def predict(self, text_list):
+        model.eval()
+        labels = []
+        probs = []
+        eval_dataloader = self.build_data_loader(text_list)
+        
         for input_ids, input_mask, segment_ids in tqdm(eval_dataloader, desc="Evaluating"):
             input_ids = input_ids.to(device)
             input_mask = input_mask.to(device)
@@ -65,20 +88,20 @@ class Classification:
 
             with torch.no_grad():
                 logits = model(input_ids, segment_ids, input_mask, labels=None)
-            if len(preds) == 0:
-                preds.append(logits.detach().cpu().numpy())
-            else:
-                preds[0] = np.append(preds[0], logits.detach().cpu().numpy(), axis=0)
+            # todo: get labels and probs
 
-        preds_prob = preds[0]
-        preds = np.argmax(preds_prob, axis=1)
-        data_frame['Scored Label'] = preds
-        data_frame['Scored Prob'] = preds_prob
         print("preds", preds)
+        return labels, probs
 
         if len(label_list) != 0:
             evaluation(all_label_ids.numpy(), preds, preds_prob, args.output_dir)
         return data_frame
+        
+    def serving_inter(self, dataframe):
+        scored_df = pd.DataFrame()
+        text_list = dataframe['text'].tolist()
+        # todo: call predict and build dataframe
+        return scored_df
 
 class InputFeatures(object):
     """A single set of features of data."""
@@ -110,45 +133,44 @@ class InputExample(object):
         self.text_b = text_b
         self.label = label
 
+def preprocess_input(max_seq_length, tokenizer, text_a, text_b = None):
+    tokens_a = tokenizer.tokenize(text_a)
+    tokens_b = None
+    if text_b:
+        tokens_b = tokenizer.tokenize(text_b)
+        _truncate_seq_pair(tokens_a, tokens_b, max_seq_length - 3)
+    else:
+        if len(tokens_a) > max_seq_length - 2:
+            tokens_a = tokens_a[:(max_seq_length - 2)]
+            
+    tokens = ["[CLS]"] + tokens_a + ["[SEP]"]
+        segment_ids = [0] * len(tokens)
+    if tokens_b:
+        tokens += tokens_b + ["[SEP]"]
+        segment_ids += [1] * (len(tokens_b) + 1)
+    input_ids = tokenizer.convert_tokens_to_ids(tokens)
+    input_mask = [1] * len(input_ids)
+    padding = [0] * (max_seq_length - len(input_ids))
+    input_ids += padding
+    input_mask += padding
+    segment_ids += padding    
+    assert len(input_ids) == max_seq_length
+    assert len(input_mask) == max_seq_length
+    assert len(segment_ids) == max_seq_length
+    return input_ids, input_mask, segment_ids
 
+# todo: does tokens_b in corpus?
+# if so, how to define ds input?
 def convert_examples_to_features(examples, max_seq_length, tokenizer, label_map):
     """Loads a data file into a list of `InputBatch`s."""
 
     features = []
     for (ex_index, example) in enumerate(examples):
-        tokens_a = tokenizer.tokenize(example.text_a)
-
-        tokens_b = None
-        if example.text_b:
-            tokens_b = tokenizer.tokenize(example.text_b)
-            _truncate_seq_pair(tokens_a, tokens_b, max_seq_length - 3)
-        else:
-            # Account for [CLS] and [SEP] with "- 2"
-            if len(tokens_a) > max_seq_length - 2:
-                tokens_a = tokens_a[:(max_seq_length - 2)]
-
-        tokens = ["[CLS]"] + tokens_a + ["[SEP]"]
-        segment_ids = [0] * len(tokens)
-
-        if tokens_b:
-            tokens += tokens_b + ["[SEP]"]
-            segment_ids += [1] * (len(tokens_b) + 1)
-
-        input_ids = tokenizer.convert_tokens_to_ids(tokens)
-
-        input_mask = [1] * len(input_ids)
-
-        padding = [0] * (max_seq_length - len(input_ids))
-        input_ids += padding
-        input_mask += padding
-        segment_ids += padding
-
-        assert len(input_ids) == max_seq_length
-        assert len(input_mask) == max_seq_length
-        assert len(segment_ids) == max_seq_length
-
-        label_id = label_map[example.label]
-
+        text_a = example.text_a
+        text_b = example.text_b or None
+        inputs_ids, input_mask, segment_ids = preprocess_input(max_seq_length, tokenizer, text_a, text_b)
+        label_id = getattr(example, 'label', None)
+    
         features.append(InputFeatures(
             input_ids=input_ids,
             input_mask=input_mask,
@@ -308,27 +330,29 @@ if __name__ == "__main__":
     args.max_seq_length = model_class.max_seq_length
 
     model.to(device)
-    eval_examples, label_list, num_labels, text_list, y_true = load_features(args.dev_file)
-    eval_features = convert_examples_to_features(
-        eval_examples, args.max_seq_length, tokenizer, model_class.label_map)
+    
+    with open(os.path.join(feature_dir, example_file), "rb") as f:
+        examples = pickle.load(f)
+    
+    text_list = [example.text_a for example in examples]
+    y_true = []
+    if example[0].label :
+        y_true = [example.label for example in examples]
+    # eval_examples, label_list, num_labels, text_list, y_true = load_features(args.dev_file)
+    # eval_features = convert_examples_to_features(
+    #    text_list, args.max_seq_length, tokenizer, model_class.label_map)
+    out = Classification.predict(text_list)
 
-    all_input_ids = torch.tensor([f.input_ids for f in eval_features], dtype=torch.long)
-    all_input_mask = torch.tensor([f.input_mask for f in eval_features], dtype=torch.long)
-    all_segment_ids = torch.tensor([f.segment_ids for f in eval_features], dtype=torch.long)
-    all_label_ids = torch.tensor([f.label_id for f in eval_features], dtype=torch.long)
-
-    eval_data = TensorDataset(all_input_ids, all_input_mask, all_segment_ids)
-    eval_sampler = SequentialSampler(eval_data)
-    eval_dataloader = DataLoader(eval_data, sampler=eval_sampler, batch_size=args.eval_batch_size)
-    if len(y_true) == 0:
+    if y_true:
         data = {'text': text_list}
     else:
         data = {'text': text_list, 'label': y_true}
 
     import pandas as pd
     frame = pd.DataFrame(data)
-    out_df = model_class.predict(eval_dataloader, frame)
-    out_df.to_parquet(os.path.join(args.output_dir, 'data.dataset.parquet'))
+    # Its ok that model accept dataframe as input . Ref to the above code to update your code.
+    # out_df = model_class.predict(eval_dataloader, frame)
+    # out_df.to_parquet(os.path.join(args.output_dir, 'data.dataset.parquet'))
 
 
 
