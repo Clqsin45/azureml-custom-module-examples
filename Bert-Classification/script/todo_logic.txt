@@ -1,0 +1,7 @@
+1. 以text或者text_list为入口，可以不使用DataLoader的逻辑，自己构建单个case，取出建造mask等的逻辑，根据他的样子自己造tensor输入直接一句一句进model，
+        all_input_ids = torch.tensor([f.input_ids for f in eval_features], dtype=torch.long)
+        all_input_mask = torch.tensor([f.input_mask for f in eval_features], dtype=torch.long)
+        all_segment_ids = torch.tensor([f.segment_ids for f in eval_features], dtype=torch.long)
+2. 以text或者text_list为入口，考虑到大数据量下的效率，参考上面后，可以自己构建batch，把batchsize句话构建一个tensor or matrix.
+3. 以text或者text_list为入口，还是想用DataLoader的话见简略代码。
+4. 也可以直接以dataframe为入口，看一下代码其实main里传dataframe和text_list没有什么区别。
